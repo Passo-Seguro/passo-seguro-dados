@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Segredos e estado de infraestrutura
+*.tfvars
+*.tfstate
+*.tfstate.*
+secrets.h
