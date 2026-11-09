@@ -21,13 +21,13 @@
 # MAGIC |---|---|---|
 # MAGIC | `coordenada_fora_do_municipio` | há coordenada **e** ela cai fora de lat -24,01 a -23,35 / lon -46,83 a -46,36 | sp156, infosiga, relatos |
 # MAGIC | `data_no_futuro` | a data do registro é posterior ao momento da execução | todas |
-# MAGIC | `categoria_fora_da_lista` | relato com `categoria` fora de buraco / piso_danificado / obstaculo / veiculo_na_calcada; SP156 com serviço fora de `SERVICOS_CALCADA` | relatos, sp156 |
+# MAGIC | `categoria_ausente_ou_fora_da_lista` | relato com `categoria` nula ou fora de buraco / piso_danificado / obstaculo / veiculo_na_calcada; SP156 com serviço nulo ou fora de `SERVICOS_CALCADA` | relatos, sp156 |
 # MAGIC
-# MAGIC Sem coordenada **não** é motivo de rejeição: o sinistro do Infosiga sem lat/lon fica na Prata com `tem_coordenada = false`. Valor nulo na categoria do relato também não barra (só valor preenchido e fora da lista).
+# MAGIC Sem coordenada **não** é motivo de rejeição: o sinistro do Infosiga sem lat/lon fica na Prata com `tem_coordenada = false`. Já a categoria **nula** é motivo de rejeição (relato sem classe não serve para a Ouro).
 # MAGIC
 # MAGIC **Pontos de atenção**
 # MAGIC - **O SP156 não tem número de protocolo.** A coluna `numero` é o número do endereço. Por isso `id_solicitacao` é derivado: hash SHA-256 dos campos que não mudam com o tempo (abertura, canal, tema, assunto, serviço, órgão, endereço, CEP, coordenadas, prefeitura, distrito) mais um contador para linhas que repetem todos esses campos (no lote 1 eram 455 linhas; são mantidas, não colapsadas). `status` e `data_de_finalizacao` ficam **fora** da chave de propósito, para a solicitação ser atualizada, e não duplicada, quando for finalizada.
-# MAGIC - **Open-Meteo:** a coleta pede só `precipitation`. `temperatura_c` existe na tabela mas fica `NULL` até a coleta pedir `temperature_2m`; a Prata já o lê se ele aparecer em `hourly`.
+# MAGIC - **Open-Meteo:** a coleta pede só `precipitation`, então a tabela tem só `precipitacao_mm` (sem temperatura).
 # MAGIC - **Fuso:** `spark.sql.session.timeZone = America/Sao_Paulo`; horas do Open-Meteo e `criado_em` sem fuso são lidos nele.
 
 # COMMAND ----------
@@ -66,17 +66,17 @@ CATEGORIAS_RELATO = ("buraco", "piso_danificado", "obstaculo", "veiculo_na_calca
 # Status do SP156 (valor em minúsculas) -> status padronizado. Valor fora daqui fica NULL e é avisado.
 MAPA_STATUS = {
     "finalizada": "finalizada",
-    "cancelada": "indeferida",  # a fonte não tem "Indeferida"; Cancelada é o único encerramento sem atendimento
+    "cancelada": "cancelada",  # status próprio: a fonte não tem "Indeferida"
     "aberto": "em_aberto",
     "em andamento": "em_aberto",
 }
 
 # Regras que se aplicam a cada fonte (também monta a tabela de barrados, com os zeros)
 REGRAS = {
-    "sp156": ["coordenada_fora_do_municipio", "data_no_futuro", "categoria_fora_da_lista"],
+    "sp156": ["coordenada_fora_do_municipio", "data_no_futuro", "categoria_ausente_ou_fora_da_lista"],
     "infosiga": ["coordenada_fora_do_municipio", "data_no_futuro"],
     "open_meteo": ["data_no_futuro"],
-    "relatos": ["coordenada_fora_do_municipio", "data_no_futuro", "categoria_fora_da_lista"],
+    "relatos": ["coordenada_fora_do_municipio", "data_no_futuro", "categoria_ausente_ou_fora_da_lista"],
 }
 
 
@@ -284,9 +284,9 @@ gravar("sp156", sp156, "id_solicitacao", [
     ("data_no_futuro",
      F.col("data_abertura").cast("timestamp") > F.lit(AGORA),
      F.col("data_abertura"), DETALHE_FUTURO),
-    ("categoria_fora_da_lista",
-     F.col("servico").isNotNull() & ~F.col("servico").isin(*SERVICOS_CALCADA),
-     F.col("servico"), F.lit("serviço fora de SERVICOS_CALCADA")),
+    ("categoria_ausente_ou_fora_da_lista",
+     F.col("servico").isNull() | ~F.col("servico").isin(*SERVICOS_CALCADA),
+     F.col("servico"), F.lit("serviço nulo ou fora de SERVICOS_CALCADA")),
 ])
 
 # COMMAND ----------
@@ -342,30 +342,23 @@ gravar("infosiga", infosiga, "id_sinistro", [
 
 # MAGIC %md
 # MAGIC ## Open-Meteo
-# MAGIC Na Bronze, `hourly` é uma **string JSON** com os arrays paralelos `time` e `precipitation` (24 posições por arquivo). A Prata faz `from_json`, junta os arrays com `arrays_zip` e usa `explode`: uma linha por hora. Se `temperature_2m` não vier em `hourly` (caso atual), `temperatura_c` fica `NULL`.
+# MAGIC Na Bronze, `hourly` é uma **string JSON** com os arrays paralelos `time` e `precipitation` (24 posições por arquivo). A Prata faz `from_json`, junta os arrays com `arrays_zip` e usa `explode`: uma linha por hora.
 
 # COMMAND ----------
 
-SCHEMA_HOURLY = "struct<time:array<string>,precipitation:array<double>,temperature_2m:array<double>>"
-
-
-def array_ou_nulos(campo):
-    """Array do campo, ou um array de NULL do mesmo tamanho de `time` se o campo não existir (arrays_zip não aceita NULL)."""
-    return F.coalesce(F.col(f"h.{campo}"), F.transform(F.col("h.time"), lambda _: F.lit(None).cast("double")))
-
+SCHEMA_HOURLY = "struct<time:array<string>,precipitation:array<double>>"
 
 open_meteo = (
     spark.table(bronze("open_meteo"))
     .select(F.from_json("hourly", SCHEMA_HOURLY).alias("h"), "arquivo_origem", "carregado_em")
     .select(
         F.col("h.time").alias("time"),
-        array_ou_nulos("precipitation").alias("precipitation"),
-        array_ou_nulos("temperature_2m").alias("temperature_2m"),
+        F.col("h.precipitation").alias("precipitation"),
         "arquivo_origem",
         "carregado_em",
     )
     .select(
-        F.explode(F.arrays_zip("time", "precipitation", "temperature_2m")).alias("z"),
+        F.explode(F.arrays_zip("time", "precipitation")).alias("z"),
         "arquivo_origem",
         "carregado_em",
     )
@@ -373,7 +366,6 @@ open_meteo = (
         F.expr("try_to_timestamp(replace(z.time, 'T', ' '), 'yyyy-MM-dd HH:mm')").alias("data_hora"),
         F.lit("Sao Paulo").alias("cidade"),
         F.col("z.precipitation").alias("precipitacao_mm"),
-        F.col("z.temperature_2m").alias("temperatura_c"),
         "arquivo_origem",
         "carregado_em",
     )
@@ -431,9 +423,9 @@ gravar("relatos", relatos, "id", [
      fora_do_municipio(F.col("lat"), F.col("lon")),
      F.concat_ws(",", F.col("lat"), F.col("lon")), DETALHE_COORDENADA),
     ("data_no_futuro", F.col("criado_em") > F.lit(AGORA), F.col("criado_em"), DETALHE_FUTURO),
-    ("categoria_fora_da_lista",
-     F.col("categoria").isNotNull() & ~F.col("categoria").isin(*CATEGORIAS_RELATO),
-     F.col("categoria"), F.lit("categoria fora de " + ", ".join(CATEGORIAS_RELATO))),
+    ("categoria_ausente_ou_fora_da_lista",
+     F.col("categoria").isNull() | ~F.col("categoria").isin(*CATEGORIAS_RELATO),
+     F.col("categoria"), F.lit("categoria nula ou fora de " + ", ".join(CATEGORIAS_RELATO))),
 ])
 
 # COMMAND ----------
