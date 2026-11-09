@@ -224,3 +224,7 @@ __marimo__/
 *.tfstate
 *.tfstate.*
 secrets.h
+
+# Pipeline de dados: lotes coletados e entradas manuais (grandes; o Databricks recebe pela interface)
+chegada/
+entrada_manual/
