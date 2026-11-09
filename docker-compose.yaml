@@ -1,0 +1,104 @@
+# Airflow local do pipeline de dados do Passo Seguro (LocalExecutor + Postgres).
+#
+#   docker compose up airflow-init     # migra o banco e cria o usuário (uma vez)
+#   docker compose up -d               # sobe webserver e scheduler
+#   http://localhost:8080              # usuário/senha: veja .env.example
+#
+# Só para desenvolvimento: a porta fica presa em 127.0.0.1 porque a senha padrão é fraca.
+
+x-airflow-common: &airflow-common
+  # Imagem própria (Dockerfile): apache/airflow:2.10.5 + openpyxl. Reconstruir: docker compose build
+  image: passo-seguro-airflow:2.10.5
+  build: .
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: America/Sao_Paulo
+    AIRFLOW__CORE__PARALLELISM: "12"
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
+    # Caminhos usados pelas DAGs (ver dags/gs_coleta_lib/comum.py).
+    CHEGADA_DIR: /opt/airflow/chegada
+    ENTRADA_MANUAL_DIR: /opt/airflow/entrada_manual
+    CACHE_DIR: /opt/airflow/cache
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./chegada:/opt/airflow/chegada
+    - ./entrada_manual:/opt/airflow/entrada_manual:ro
+    - airflow-logs:/opt/airflow/logs
+    - airflow-cache:/opt/airflow/cache
+  depends_on: &airflow-depends-on
+    postgres:
+      condition: service_healthy
+    airflow-init:
+      condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  airflow-init:
+    <<: *airflow-common
+    # Roda como root só para ajustar o dono dos volumes; o Airflow em si roda como AIRFLOW_UID.
+    user: "0:0"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /opt/airflow/chegada
+        chown -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/logs /opt/airflow/cache /opt/airflow/chegada
+        exec /entrypoint airflow version
+    environment:
+      <<: *airflow-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  airflow-postgres:
+  airflow-logs:
+  airflow-cache:

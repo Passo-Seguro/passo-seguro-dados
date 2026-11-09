@@ -1,0 +1,3 @@
+# O build só precisa do requirements.txt; sem isto o Docker enviaria chegada/ e entrada_manual/ (GBs).
+*
+!requirements.txt
