@@ -1,0 +1,2 @@
+# Dependências extras das coletas, além do que já vem na imagem do Airflow.
+openpyxl==3.1.5
