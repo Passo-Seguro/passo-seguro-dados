@@ -94,3 +94,60 @@ Abra o notebook, conecte ao compute serverless e use **Run all**. Ele lê cada p
 - Arquivo só com cabeçalho (ex.: `infosiga_2026-09-10.csv`) é lido sem erro, mas não gera linha, então não conta em `arquivos distintos`.
 - Em `open_meteo` e `relatos` cada arquivo é uma linha; `hourly` e `itens` seguem aninhados até a Prata.
 - Para recomeçar uma fonte do zero: apague a tabela e as pastas `schema_<fonte>` e `checkpoint_<fonte>` em `_controle/`.
+
+## Prata
+
+O notebook [`databricks/02_prata.py`](databricks/02_prata.py) lê a Bronze **inteira** a cada execução, tipa e limpa, deduplica pela chave e grava por `MERGE` em `workspace.gs.prata_sp156`, `prata_infosiga`, `prata_open_meteo` e `prata_relatos`. O que uma regra de qualidade barra não entra nessas tabelas e vai para `workspace.gs.prata_rejeitados` (`fonte`, `chave`, `regra`, `valor`, `detalhe`, `carregado_em`). Importe e rode como a Bronze (`/Users/<seu e-mail>/passo-seguro/02_prata`, *Run all*). Depois de subir o lote 2, basta rodar de novo.
+
+Reexecutar não duplica: os aceitos entram por `MERGE` na chave e os barrados por `MERGE` em `(fonte, chave, regra)`. O fuso da sessão é `America/Sao_Paulo`.
+
+### Chaves
+
+| Tabela | Chave | Observação |
+|---|---|---|
+| `prata_sp156` | `id_solicitacao` | **A fonte não traz protocolo** (`numero` é o número do endereço). A chave é o SHA-256 dos campos que não mudam com o tempo (abertura, canal, tema, assunto, serviço, órgão, logradouro, número, CEP, coordenadas, prefeitura, distrito) mais um contador para linhas idênticas. `status` e `data_de_finalizacao` ficam fora, para a solicitação ser atualizada quando for finalizada |
+| `prata_infosiga` | `id_sinistro` | |
+| `prata_open_meteo` | `data_hora` | uma linha por hora; `cidade = 'Sao Paulo'` |
+| `prata_relatos` | `id` | `simulado` e `origem` preservados |
+
+Cada lote é deduplicado pela chave antes do `MERGE`, ficando o registro de `carregado_em` mais recente.
+
+### Tratamento
+
+- **SP156:** datas `DD/MM/AAAA` → `date` (`data_abertura`, `data_finalizacao`); lat/lon → `double`; `cep` só com 8 dígitos, senão nulo (`03.711000` → `03711000`; CEP de 5 ou 3 dígitos vira nulo); textos com `trim`; `categoria` = `calcada` (3 serviços de calçada e acessibilidade) ou `guia_sarjeta`; `status` padronizado (`status_original` é mantido).
+- **Infosiga:** `data_sinistro` → `date`; `hora` em texto `HH:mm` e `data_hora_sinistro` em `timestamp`; lat/lon com vírgula → `double`; contagens → `int`; `tem_coordenada` (bool). **Sinistro sem coordenada não é barrado**: fica com `tem_coordenada = false`.
+- **Open-Meteo:** `from_json` em `hourly` + `arrays_zip` + `explode`: `data_hora`, `precipitacao_mm`, `temperatura_c`. A coleta só pede `precipitation`, então **`temperatura_c` fica nula** até a DAG pedir `temperature_2m`.
+- **Relatos:** `from_json` em `itens` + `explode`, um relato por linha; a classe do relato é o campo `categoria`.
+
+### Status do SP156
+
+| Na fonte | Na Prata |
+|---|---|
+| Finalizada | `finalizada` |
+| Cancelada | `indeferida` (a fonte não tem "Indeferida"; Cancelada é o único encerramento sem atendimento) |
+| Aberto, Em Andamento | `em_aberto` |
+
+Valor novo fora dessa tabela fica nulo e o notebook avisa; acrescente em `MAPA_STATUS`.
+
+### Regras de qualidade
+
+| Regra | Barra quando | Fontes |
+|---|---|---|
+| `coordenada_fora_do_municipio` | há coordenada e ela está fora de lat -24,01 a -23,35 / lon -46,83 a -46,36 | sp156, infosiga, relatos |
+| `data_no_futuro` | a data do registro (abertura, sinistro, hora, `criado_em`) é posterior ao momento da execução | todas |
+| `categoria_fora_da_lista` | relato com `categoria` preenchida e fora de buraco / piso_danificado / obstaculo / veiculo_na_calcada; SP156 com serviço fora de `SERVICOS_CALCADA` | relatos, sp156 |
+
+Sem coordenada, ou com categoria nula, o registro **não** é barrado. `SERVICOS_CALCADA` é copiado de `dags/gs_coleta_lib/sp156.py` para o notebook; mantenha as duas listas iguais. Se um registro deixa de falhar numa regra (ex.: data que era futura), o `MERGE` o tira de `prata_rejeitados`, então ele nunca fica aceito e barrado ao mesmo tempo.
+
+### Resultado esperado com o lote 1 (até 31/08/2026)
+
+Conferido por script local sobre `chegada/`, sem usar o notebook:
+
+| Fonte | Aceitos | Barrados |
+|---|---|---|
+| sp156 | 10.666 | 1 `coordenada_fora_do_municipio` (lat/lon = 0) |
+| infosiga | 926 (855 com coordenada, 71 sem) | 0 |
+| open_meteo | 2.208 | 0 |
+| relatos | 1.734 | 0 |
+
+Status do SP156 aceito: 5.882 `em_aberto`, 4.773 `finalizada`, 11 `indeferida`. As regras `data_no_futuro` e `categoria_fora_da_lista` dão zero em todas as fontes com esses dados: a coleta de relatos gera só relatos válidos. Os 11 relatos inválidos de propósito estão em `amostras/relatos_mock.json`, que não vai para `chegada/`.
