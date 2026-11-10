@@ -57,6 +57,7 @@ Camada Bronze do Medallion no Databricks Free Edition (catálogo `workspace`). A
 databricks schemas create gs workspace --profile gs
 databricks volumes create workspace gs chegada MANAGED --profile gs   # arquivos coletados
 databricks volumes create workspace gs privado MANAGED --profile gs   # segredos (sal, usado só na Ouro)
+databricks volumes create workspace gs export MANAGED --profile gs    # painel.json da Ouro (consumido pela API)
 for p in sp156 infosiga open_meteo relatos geo; do
   databricks fs mkdir dbfs:/Volumes/workspace/gs/chegada/$p --profile gs
 done
@@ -145,7 +146,7 @@ Como a fonte não traz protocolo, não há como saber se duas linhas idênticas 
 
 ### Dado pessoal: número e CEP do SP156
 
-`numero` e `cep` (endereço exato de quem pediu) ficam **só na Prata**, que é a camada interna. Eles **saem da Ouro**; a Ouro não os expõe. `logradouro` e as coordenadas seguem adiante.
+`numero` e `cep` (endereço exato de quem pediu) ficam **só na Prata**, que é a camada interna. Eles **saem da Ouro**; a Ouro não os expõe. `logradouro` também fica só na Prata, e as coordenadas só seguem para a Ouro arredondadas (seção Ouro).
 
 ### Resultado esperado com o lote 1 (até 31/08/2026)
 
@@ -159,3 +160,121 @@ Conferido por script local sobre `chegada/`, sem usar o notebook:
 | relatos | 1.640 | 94 `categoria_ausente_ou_fora_da_lista` (categoria nula) |
 
 Status do SP156 aceito: 5.882 `em_aberto`, 4.773 `finalizada`, 11 `cancelada`. `data_no_futuro` dá zero em todas as fontes, e `categoria_ausente_ou_fora_da_lista` só barra os 94 relatos sem categoria (nenhum tem categoria fora da lista). Nenhuma solicitação do SP156 tem `data_de_finalizacao` anterior à abertura, por isso não há regra para isso. Os 11 relatos inválidos de propósito estão em `amostras/relatos_mock.json`, que não vai para `chegada/`.
+
+## Ouro
+
+Camada final: modelo dimensional sem dado pessoal, uma view de prioridades por subprefeitura e o `painel.json` que a API serve em `GET /painel`. Ordem de execução: Bronze → Prata → **Ouro** (`03_ouro`) → consultas (`04_consultas`) → export (`05_export`). A Ouro é **derivada**: cada execução refaz todas as tabelas com `CREATE OR REPLACE TABLE` a partir da Prata, então depois do lote 2 basta rodar a Bronze, a Prata e a Ouro de novo.
+
+| Arquivo | O que faz |
+|---|---|
+| [`scripts/preparar_geo.py`](scripts/preparar_geo.py) | baixa e simplifica os limites do GeoSampa (uma vez) |
+| [`databricks/03_ouro.py`](databricks/03_ouro.py) | dimensões, fatos, view `vw_prioridades` e testes de LGPD |
+| [`databricks/04_consultas.sql`](databricks/04_consultas.sql) | as 5 perguntas (Q4 em duas versões), só sobre a Ouro |
+| [`databricks/05_export.py`](databricks/05_export.py) | grava `vw_prioridades` em `workspace.gs.export/painel.json` |
+| [`scripts/conferir_ouro.py`](scripts/conferir_ouro.py) | refaz tudo localmente a partir de `chegada/` para conferir os números |
+| [`docs/proposta-contrato-painel.md`](docs/proposta-contrato-painel.md) | campos a acrescentar em `GET /painel` no `openapi.yaml` |
+
+### Limites geográficos (GeoSampa)
+
+**Fonte:** GeoSampa / SMUL, Prefeitura de São Paulo, serviço WFS público (`http://wfs.geosampa.prefeitura.sp.gov.br/geoserver/geoportal/wfs`), camadas `geoportal:subprefeitura` (32 polígonos) e `geoportal:distrito_municipal` (96). **Baixado em 09/11/2026.** O serviço é aberto, sem login; se um dia recusar o acesso (401/403) o script para sem tentar contornar.
+
+```bash
+python scripts/preparar_geo.py     # grava entrada_manual/geo/{subprefeitura,distrito}.geojson (EPSG:4326, simplificados)
+for n in subprefeitura distrito; do
+  MSYS_NO_PATHCONV=1 databricks fs cp entrada_manual/geo/$n.geojson dbfs:/Volumes/workspace/gs/chegada/geo/$n.geojson --overwrite --profile gs
+done
+```
+
+O script confere as contagens (32 e 96) e se as coordenadas estão em lat/lon dentro da caixa de São Paulo, e simplifica com tolerância de ~5,5 m (de 2,4 MB e 4,0 MB para 222 KB e 325 KB). **Os arquivos de `geo/` são referência, não lote**: a Bronze não os lê. A fonte tem um polígono de subprefeitura com auto-interseção, corrigido com `make_valid`.
+
+**Nomes.** Os nomes do GeoSampa já vêm em maiúsculas e sem acento, e as 32 subprefeituras e os 96 distritos **coincidem exatamente** com os do SP156 depois de normalizar; por isso não há mapa de correção. As diferenças estão em 31 linhas do SP156 cuja `prefeitura_operacional` não é subprefeitura: `SUPERINTENDENCIA DAS USINAS DE ASFALTO` (19), nulo (7), `PREFEITURA REGIONAL NAO ENCONTRADA` (4) e `DEPARTAMENTO DE ESTRADAS DE RODAGEM` (1). Dois distritos também vêm nulos.
+
+### Modelo dimensional
+
+| Tabela | Uma linha por | Colunas |
+|---|---|---|
+| `dim_tempo` | data (do primeiro ao último dia de qualquer fonte) | `data`, `ano`, `mes`, `dia_semana`, `precipitacao_dia_mm`, `chuva_forte` |
+| `dim_local` | par (subprefeitura, distrito): os 96 do GeoSampa + `NAO_IDENTIFICADO` | `local_id`, `subprefeitura`, `distrito` |
+| `dim_categoria` | categoria de cada fonte | `categoria_id`, `categoria`, `grupo` |
+| `fato_ocorrencia` | solicitação do SP156 e relato | `id_ocorrencia_hash`, `origem` (`sp156`/`relato`), `data`, `local_id`, `categoria_id`, `status`, `dias_ate_conclusao`, `simulado`, `latitude_arred`, `longitude_arred` |
+| `fato_sinistro_pedestre` | sinistro do Infosiga com pedestre | `id_sinistro`, `data`, `local_id`, `qtd_pedestres`, `qtd_pedestres_feridos`, `qtd_pedestres_mortos` |
+
+- **Local por ponto no polígono**, com `shapely` (`%pip` no notebook), para as **três** fontes. Ponto numa fresta de poucos metros entre polígonos (efeito da simplificação) recebe o polígono mais próximo, até ~50 m. Sem coordenada, ou fora de qualquer polígono, o local é `NAO_IDENTIFICADO`. **O SP156 também usa o ponto**, e não a subprefeitura que ele declara: na comparação (lote 1) ela não é confiável. Além dos 31 valores acima, em 2,0% das linhas (209 de 10.635) diverge do ponto no polígono e em 196 contradiz o próprio distrito declarado. O declarado só serve de reserva quando o ponto não cai em polígono (hoje nunca).
+- **Categoria:** `calcada` e `guia_sarjeta` (grupos de mesmo nome) no SP156; `buraco`, `piso_danificado`, `obstaculo` e `veiculo_na_calcada` nos relatos, todos no grupo `calcada`.
+- **Status:** SP156 `em_aberto`, `finalizada`, `cancelada` (a fonte não tem "indeferida"). Relatos: `novo`, `revisao_humana`, `validado`, `encaminhado` → `em_aberto`; `resolvido` → `finalizada`; `rejeitado` → `indeferida`. `dias_ate_conclusao` só existe nas `finalizada` do SP156 (relatos não têm data de conclusão).
+- **Chuva forte:** `precipitacao_dia_mm` é a soma das 24 horas do dia; `chuva_forte` = **≥ 10 mm/dia**; dia sem clima fica nulo. Os 10 mm são analíticos: com 50 mm/dia (alerta de chuva intensa do INMET) nenhum dia de jun-ago/2026 qualifica; com 10 mm há 4 dias no lote 1 (de 92) e 23 de 161 no clima até 08/11. A amostra do lote 1 é pequena, então a Q5 é indício.
+- **As análises usam só `origem = 'sp156'`.** Os relatos são simulados e existem só nas áreas-piloto; ficam na `fato_ocorrencia` para o painel, mas nenhuma consulta nem o índice os usa, exceto `relatos_abertos`/`relatos_por_categoria` da view (que são do contrato).
+
+### LGPD na Ouro
+
+| Dado | Tratamento |
+|---|---|
+| Número do endereço e CEP (SP156) | **não entram** na Ouro |
+| `logradouro` | não entra |
+| Coordenadas | arredondadas a 3 casas (~100 m): `latitude_arred`, `longitude_arred`; a atribuição de local usa a coordenada completa e o arredondamento vem depois |
+| Id do registro | `id_ocorrencia_hash = sha2(concat(sal, id), 256)`; o id original não entra. Sal lido de `/Volumes/workspace/gs/privado/sal.txt`, nunca exibido nem gravado |
+
+**Os relatos não trazem identificador de cidadão.** O contrato da API nunca devolve o `autor_id` (a API guarda só o hash), e o JSON coletado, a Bronze e a Prata não têm esse campo; o único identificador é o `id` do próprio relato, que é o que vira hash (o mesmo vale para o `id_solicitacao` do SP156). Se a API passar a entregar um campo de autor, aplique o mesmo `sha2(concat(sal, autor), 256)` numa coluna nova. A última célula de `03_ouro` mostra 5 linhas de relatos com o hash e roda os testes: nenhum nome de coluna da Ouro é número, CEP, logradouro, id ou coordenada exata; nenhum id original nem CEP aparece em coluna de texto; o hash dos relatos confere com a fórmula; as coordenadas têm até 3 casas. `id_sinistro` (id público do Infosiga) permanece.
+
+### View `vw_prioridades` e o contrato de `GET /painel`
+
+Uma linha por subprefeitura (as 32). Tem **duas famílias de colunas**: as do contrato (`PrioridadeSubprefeitura` no `openapi.yaml`, que o `05_export` grava) e as de análise (ainda fora do contrato).
+
+| Coluna | Tipo | Contrato | Origem |
+|---|---|---|---|
+| `subprefeitura` | string | sim | GeoSampa |
+| `prioridade` | `alta`/`media`/`baixa` | sim | faixa do `indice_prioridade` |
+| `relatos_abertos` | int | sim | relatos `em_aberto` (simulados) |
+| `relatos_por_categoria` | struct das 4 classes | sim | os mesmos relatos, por classe |
+| `tempo_medio_ate_reparo_dias` | double ou nulo | sim | média de `dias_ate_conclusao` do SP156 `finalizada` |
+| `atualizado_em` | timestamp | sim | `current_timestamp()`; no JSON vira ISO 8601 com fuso |
+| `reclamacoes_calcada_sp156`, `reclamacoes_guia_sarjeta_sp156` | int | proposta | solicitações SP156 |
+| `atropelamentos_pedestres`, `pedestres_mortos` | int | proposta | Infosiga (sinistros com pedestre; mortos) |
+| `indice_prioridade` | double 0 a 1 | proposta | abaixo |
+| `pct_em_aberto` | double | só na view | % das solicitações SP156 `em_aberto` |
+
+- **`indice_prioridade`** = `(mm(atropelamentos_pedestres) + mm(reclamacoes_calcada_sp156)) / 2`, com `mm(x) = (x − mínimo) / (máximo − mínimo)` entre as 32 subprefeituras. Guia e sarjeta não entram no índice.
+- **`prioridade`** é a posição relativa do índice (`PERCENT_RANK`): terço de cima `alta` (≥ 2/3), do meio `media` (≥ 1/3), de baixo `baixa`. É relativa: sempre há subprefeituras nas três faixas.
+- **O contrato atual não tem os campos de análise** (`GET /painel` só fala de relatos). Eles ficam na view e **fora** do `painel.json`, porque a API responde `503 painel_invalido` se o arquivo sair do schema. Em `05_export.py` a lista está na constante `COLUNAS_EXTRAS`: quando o contrato for ampliado (proposta em [`docs/proposta-contrato-painel.md`](docs/proposta-contrato-painel.md)), mude **uma linha**, `INCLUIR_EXTRAS = True`. Os objetos do `painel.json` foram conferidos contra o schema `PrioridadeSubprefeitura` real do `openapi.yaml` (com e sem os extras).
+- `relatos_abertos` e `relatos_por_categoria` são zero na maior parte da cidade enquanto os relatos forem simulados.
+
+### Export
+
+`05_export.py` lê a view, ordena por `indice_prioridade` decrescente (como o contrato pede), valida cada objeto contra o contrato e grava **um único** `/Volumes/workspace/gs/export/painel.json` (array de objetos, UTF-8, sem `_SUCCESS` nem `part-*`): o Python escreve direto no Volume. Se algum objeto sair do contrato, o notebook para antes de gravar.
+
+### Importar os notebooks
+
+```bash
+for n in 03_ouro:PYTHON:py 04_consultas:SQL:sql 05_export:PYTHON:py; do
+  IFS=: read nome lang ext <<< "$n"
+  MSYS_NO_PATHCONV=1 databricks workspace import "/Users/<seu e-mail>/passo-seguro/$nome" \
+    --file databricks/$nome.$ext --format SOURCE --language $lang --overwrite --profile gs
+done
+```
+
+Rode no compute serverless, nesta ordem: `03_ouro` → `04_consultas` → `05_export` (Run all). O `03_ouro` instala o `shapely` com `%pip` e reinicia o Python na segunda célula.
+
+### Resultado esperado com o lote 1 (até 31/08/2026)
+
+Conferido por `python scripts/conferir_ouro.py` (Prata refeita a partir de `chegada/`, sem usar os notebooks; ela reproduz os números da Prata acima). `--corte AAAA-MM-DD` troca a data.
+
+| Tabela | Linhas |
+|---|---|
+| `fato_ocorrencia` | 12.306 (10.666 `sp156` + 1.640 `relato`) |
+| `fato_sinistro_pedestre` | 926 (77 sem local: 71 sem coordenada + 6 fora dos polígonos) |
+| `dim_tempo` | 92 (01/06 a 31/08) |
+| `dim_categoria` | 6 |
+
+**Status:** SP156 5.882 `em_aberto`, 4.773 `finalizada`, 11 `cancelada`; relatos 1.341 `em_aberto`, 212 `finalizada`, 87 `indeferida`. Apenas 1 solicitação do SP156 fica sem local.
+
+**Q1** (calçada; entre parênteses calçada + guia e sarjeta e a posição): Santo Amaro 297 (1º; 426, 4º), Sé 282 (2º; 404, 11º), Vila Mariana 221 (3º; 407, 10º), Mooca 208 (4º; 408, 9º), Pinheiros 167 (5º; 424, 5º). Com guia e sarjeta lideram Itaquera (672), Pirituba-Jaraguá (551) e Jaçanã-Tremembé (516).
+
+**Q2** (SP156 finalizadas): `calcada` 1.102, média 15,3 e mediana 7,0 dias; `guia_sarjeta` 3.671, média 20,4 e mediana 14,0.
+
+**Q3:** SP156 44,7% finalizada, 0,0% indeferida, 0,1% cancelada, 55,1% em aberto; relatos 12,9% / 5,3% / 0,0% / 81,8%.
+
+**Q4** (01/06 a 30/09; no lote 1 só até 31/08), no quartil superior (≥ P75) nas duas: só calçada, **Mooca** (65 atropelamentos, 208 reclamações), **Sé** (89, 282) e **Vila Mariana** (34, 221); calçada + guia e sarjeta, **Capela do Socorro** (39, 424), **M Boi Mirim** (39, 411) e **Pirituba-Jaraguá** (33, 551).
+
+**Q5** (01/06 a 31/08): chuva forte 4 dias, 421 solicitações, média **105,3/dia**; demais 88 dias, 10.245, média **116,4/dia**.
+
+**`vw_prioridades`:** 11 `alta`, 10 `media`, 11 `baixa`. Topo: Sé 0,972 (282 calçada, 89 atropelamentos, 2 mortos, 16,4 dias, 37,6% em aberto), Mooca 0,696, Santo Amaro 0,622, Vila Mariana 0,540, Pinheiros 0,405; a menor é Parelheiros (0,008). As 32 linhas saem do script.
