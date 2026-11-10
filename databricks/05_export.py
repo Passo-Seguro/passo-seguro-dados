@@ -6,9 +6,11 @@
 # MAGIC
 # MAGIC **Formato.** Array de objetos, UTF-8, ordenado da maior para a menor prioridade (`indice_prioridade` decrescente), como o contrato pede. O arquivo é escrito direto pelo Python no Volume (a view tem 32 linhas), então não existem os arquivos `_SUCCESS` nem `part-*` que o Spark criaria. Cada execução reescreve o mesmo `painel.json`.
 # MAGIC
-# MAGIC **Contrato.** Hoje o arquivo traz **só as colunas de `PrioridadeSubprefeitura`** do `openapi.yaml` (`GET /painel`): `subprefeitura`, `prioridade`, `relatos_abertos`, `relatos_por_categoria`, `tempo_medio_ate_reparo_dias`, `atualizado_em`. A API responde `503 painel_invalido` se o arquivo sair do schema, por isso o notebook **valida cada objeto contra o contrato antes de gravar** e para sem tocar no arquivo se algo estiver fora.
+# MAGIC **Contrato.** O arquivo traz as **colunas de `PrioridadeSubprefeitura`** do `openapi.yaml` (`GET /painel`): `subprefeitura`, `prioridade`, `relatos_abertos`, `relatos_por_categoria`, `tempo_medio_ate_reparo_dias`, `atualizado_em`, **mais os 5 campos extras** (opcionais no contrato, que foi ampliado no PR #25 do `passo-seguro`): `reclamacoes_calcada_sp156`, `reclamacoes_guia_sarjeta_sp156`, `atropelamentos_pedestres`, `pedestres_mortos` e `indice_prioridade`. A API responde `503 painel_invalido` se o arquivo sair do schema, por isso o notebook **valida cada objeto contra o contrato antes de gravar** e para sem tocar no arquivo se algo estiver fora.
 # MAGIC
-# MAGIC **Colunas extras.** `COLUNAS_EXTRAS` lista os campos de análise da view que ainda não estão no contrato (ver `docs/proposta-contrato-painel.md`). Quando o contrato for ampliado, mude **uma linha**: `INCLUIR_EXTRAS = True`.
+# MAGIC **Colunas extras.** `COLUNAS_EXTRAS` lista os 5 campos de análise da view e `INCLUIR_EXTRAS = True` os leva para o arquivo. Se precisar voltar ao contrato antigo, mude **uma linha**: `INCLUIR_EXTRAS = False`.
+# MAGIC
+# MAGIC **Depois deste notebook:** rode `scripts/publicar_painel.ps1` (ou `.sh`) para baixar o `painel.json`, validar contra o `openapi.yaml` e enviar ao Azure Blob Storage. Este notebook só grava no Volume; quem publica para a API é o script.
 
 # COMMAND ----------
 
@@ -41,7 +43,7 @@ COLUNAS_EXTRAS = [
     "pedestres_mortos",
     "indice_prioridade",
 ]
-INCLUIR_EXTRAS = False  # <- mude para True quando o contrato for ampliado
+INCLUIR_EXTRAS = True  # contrato ampliado no PR #25 do passo-seguro (campos opcionais de PrioridadeSubprefeitura)
 
 PRIORIDADES = {"alta", "media", "baixa"}
 CATEGORIAS = ["buraco", "piso_danificado", "obstaculo", "veiculo_na_calcada"]
