@@ -17,6 +17,18 @@ Ficha Técnica: [README do repositório principal](https://github.com/Passo-Segu
 
 A DAG `gs_coleta` (`@daily`, `start_date` 2026-06-01, `catchup=True`) grava **um arquivo por fonte e por dia** em `chegada/<fonte>/`. O upload ao Databricks é manual, pela interface.
 
+```
+inicio >> [coletar_sp156, coletar_infosiga, coletar_open_meteo, coletar_relatos] >> conferir_chegada
+```
+
+São 6 tarefas: `inicio` (`EmptyOperator`), as 4 coletas em paralelo e `conferir_chegada`, que confere se os arquivos chegaram. Cada coleta tem o nome da fonte e da pasta em `chegada/`.
+
+![Graph da DAG gs_coleta: inicio, as 4 coletas em paralelo e conferir_chegada](relatorio/prints/06a_airflow_graph.png)
+
+![Grid da gs_coleta: 162 execuções diárias de 01/06 a 09/11/2026](relatorio/prints/06b_airflow_grid.png)
+
+No Grid, `coletar_sp156` e `coletar_infosiga` ficam em rosa (`skipped`) de 01/10/2026 em diante. Não é falha: veja o primeiro item de "Como ler os dados".
+
 | Fonte | Arquivo | Origem |
 |---|---|---|
 | `sp156` | `sp156_AAAA-MM-DD.csv` | Arquivo trimestral da Prefeitura (CKAN), só os 4 serviços de calçada (abaixo) |
@@ -26,11 +38,23 @@ A DAG `gs_coleta` (`@daily`, `start_date` 2026-06-01, `catchup=True`) grava **um
 
 ### Como ler os dados
 
-- **SP156 e Infosiga são carregamentos retroativos, particionados pela data do registro.** O dia no nome do arquivo (`sp156_2026-07-15.csv`) é a data em que a solicitação foi **aberta** (SP156) ou em que o sinistro **aconteceu** (Infosiga), e não o dia em que a DAG rodou. As duas fontes publicam arquivos fechados, semanas depois; por isso o histórico desde 2026-06-01 é carregado de uma vez (catchup) e cada dia sai da carga mais recente disponível. Dia que a fonte ainda não publicou fica `skipped`, sem arquivo. Reexecutar um dia reescreve o mesmo arquivo. No Databricks, particione pelo dia do nome do arquivo.
+- **SP156 e Infosiga são carregamentos retroativos, particionados pela data do registro.** O dia no nome do arquivo (`sp156_2026-07-15.csv`) é a data em que a solicitação foi **aberta** (SP156) ou em que o sinistro **aconteceu** (Infosiga), e não o dia em que a DAG rodou. As duas fontes publicam arquivos fechados, semanas depois; por isso o histórico desde 2026-06-01 é carregado de uma vez (catchup) e cada dia sai da carga mais recente disponível. **SP156 e Infosiga só publicam o trimestre depois que ele fecha**, então dia cujo trimestre ainda não saiu (hoje, de 01/10/2026 em diante: 40 dias em cada fonte) fica `skipped`, sem arquivo; não é erro. Quando o trimestre sair, limpe essas coletas (`airflow tasks clear gs_coleta -t '^coletar_(sp156|infosiga)$' -s 2026-10-01 -d -y`) para recoletar. Reexecutar um dia reescreve o mesmo arquivo. No Databricks, particione pelo dia do nome do arquivo.
 - **Infosiga: uma linha por sinistro com pedestre.** Entram os sinistros do município `SAO PAULO` com ao menos uma vítima `tipo_de_vitima = 'PEDESTRE'` (arquivo `pessoas`, ligado por `pessoas.id_sinistro` → `sinistros.id_sinistro`). Colunas, separadas por `;`, em UTF-8 como o SP156: `id_sinistro`, `data_sinistro`, `hora`, `municipio`, `logradouro`, `latitude`, `longitude`, `qtd_pedestres`, `qtd_pedestres_feridos` (gravidade `GRAVE` ou `LEVE`), `qtd_pedestres_mortos` (`FATAL`). Pedestres `ILESO` ou `NAO DISPONIVEL` contam só em `qtd_pedestres`. Não há veículos nem dado individual de pessoa (idade, sexo etc.). `latitude` e `longitude` ficam **como vêm, com vírgula decimal** (`-23,5019`), e sinistros sem coordenada (cerca de 8%) **são mantidos** com os dois campos vazios: converter e tratar na Prata. Dia em que a fonte tem sinistros mas nenhum com pedestre gera arquivo só com o cabeçalho.
 - **SP156 filtra por Serviço, não por Assunto.** Em 05/2026 a Prefeitura passou os mesmos serviços de calçada de "Calçadas, guias e postes" para "Fiação e Postes", então o Assunto não serve de filtro. A constante `SERVICOS_CALCADA` (`dags/gs_coleta_lib/sp156.py`) tem exatamente: *Calçada pública - solicitar manutenção*; *Calçada particular - denunciar calçada danificada ou inexistente*; *Acessibilidade - solicitar avaliação de obstáculo na calçada*; *Guias, sarjetas e sarjetões - solicitar manutenção*. Tapa-buraco (asfalto) e poda de árvore ficam de fora de propósito. O trimestre é lido do XLSX (datas tipadas) e convertido ao mesmo CSV do 2º TRI (`;`, `DD/MM/AAAA`); o arquivo fica em cache no volume `airflow-cache` e não é baixado de novo (para reprocessar um trimestre, apague-o de lá).
-- **Relatos são simulados até a API estar no ar.** Com `PASSO_SEGURO_API_URL` vazia, a DAG gera relatos fictícios e determinísticos nas áreas-piloto (Sé e Pinheiros), todos com `"simulado": true` e `"origem": "mock"` no arquivo. Não use para análise real. Quando a API subir, preencha `PASSO_SEGURO_API_URL` e `PASSO_SEGURO_API_TOKEN` e limpe `coletar_relatos` (`airflow tasks clear gs_coleta -t '^coletar_relatos$' -y`) para recoletar o histórico com `"origem": "api"`.
+- **Relatos são simulados até a API estar no ar.** Com `PASSO_SEGURO_API_URL` vazia, a DAG gera relatos fictícios e determinísticos nas áreas-piloto (Sé e Pinheiros), todos com `"simulado": true` e `"origem": "mock"` no arquivo. Não use para análise real. Quando a API subir, preencha `PASSO_SEGURO_API_URL` e `PASSO_SEGURO_API_TOKEN` e limpe `coletar_relatos` (`airflow tasks clear gs_coleta -t '^coletar_relatos$' -d -y`; o `-d` refaz também a conferência) para recoletar o histórico com `"origem": "api"`.
 - **O clima usa um único ponto, na Praça da Sé** (lat -23,5505, lon -46,6333), para representar a cidade inteira; a chuva varia entre zonas. Vem do arquivo histórico da Open-Meteo, e dos dias mais recentes (ainda sem reanálise) vem da previsão; o campo `coleta.api` do JSON diz qual API respondeu.
+
+### Conferência de chegada (`conferir_chegada`)
+
+Roda depois das 4 coletas, com `trigger_rule=none_failed`: roda quando nenhuma coleta falhou, **mesmo que todas tenham ficado `skipped`**, para falhar nesse caso em vez de ficar `skipped` sem avisar. (Se uma coleta falhar, o alerta já sai dela e a conferência fica `upstream_failed`.) Para o dia do run, ela confere:
+
+- coleta em `success`: existe `chegada/<fonte>/<fonte>_AAAA-MM-DD.<ext>` e o arquivo não está vazio (0 bytes). CSV só com cabeçalho (dia do Infosiga sem sinistro com pedestre) é válido e sai como aviso no log;
+- coleta em `skipped`: não há arquivo, e o log traz o motivo (lido do log da coleta, porque o Airflow não o guarda no banco);
+- **falha** se uma coleta `success` não deixou arquivo, se o estado for inesperado ou se nenhuma fonte gravou. A falha não tem nova tentativa e dispara o mesmo alerta do Discord das outras tarefas (`on_failure_callback` da DAG).
+
+O log de cada run lista uma linha por fonte (`[CHEGOU]` ou `[SKIPPED] ... Motivo: ...`) e um resumo. A lógica está em `dags/gs_coleta_lib/conferir.py`, separada da DAG para ser testável sem o Airflow.
+
+**Runs antigos.** `inicio` e `conferir_chegada` foram acrescentadas aos 162 runs já executados (01/06 a 09/11) **sem regravar nenhum arquivo de `chegada/`**. `airflow tasks clear` só limpa tarefas que já existem no banco, e essas duas não existiam nos runs antigos; por isso cada run foi recolocado na fila (`queued`). O scheduler então criou só as tarefas que faltavam e executou só elas, e as `coletar_*`, já em `success`/`skipped`, não foram reexecutadas. Conferido depois: hash e mtime dos 568 arquivos de `chegada/` iguais aos de antes, e as 648 tarefas `coletar_*` com estado, início, fim e tentativas intactos. Efeito colateral: a data de início e a duração de cada run, na interface, passam a ser as da conferência (10/11/2026, cerca de 1 s), não as da coleta original.
 
 ### Subir o Airflow
 
@@ -45,7 +69,7 @@ docker compose exec airflow-scheduler airflow variables set PASSO_SEGURO_API_URL
 docker compose exec airflow-scheduler airflow dags unpause gs_coleta   # catchup desde 2026-06-01
 ```
 
-Falha de qualquer tarefa (após as tentativas) posta um alerta no webhook. Para testar: `airflow variables set FORCAR_FALHA_FONTE relatos`, dispare a DAG e depois `airflow variables delete FORCAR_FALHA_FONTE`.
+Falha de qualquer tarefa (após as tentativas), inclusive `conferir_chegada`, posta um alerta no webhook. Para testar: `airflow variables set FORCAR_FALHA_FONTE relatos`, dispare a DAG e depois `airflow variables delete FORCAR_FALHA_FONTE`.
 
 ## Databricks
 
