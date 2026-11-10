@@ -20,7 +20,7 @@
 # MAGIC
 # MAGIC ## Regras
 # MAGIC
-# MAGIC **Local (subprefeitura e distrito) por ponto no polígono.** Os limites vêm do GeoSampa (`chegada/geo/subprefeitura.geojson` e `distrito.geojson`, arquivos de referência, não lote). Cada ponto recebe a subprefeitura e o distrito do polígono que o contém, com `shapely`. Um ponto que cai numa fresta de poucos metros entre dois polígonos (efeito da simplificação) recebe o polígono mais próximo, até ~50 m. **Sem coordenada, ou fora de qualquer polígono, o local é `NAO_IDENTIFICADO`.** Vale para as três fontes, inclusive o SP156: a subprefeitura que o SP156 declara (`prefeitura_operacional`) é comparada na seção abaixo e **não é confiável** (valores que não são subprefeitura, e ~2% que contradizem o próprio distrito ou o ponto), então ela só serve de reserva se o ponto não cair em nenhum polígono. Os nomes do GeoSampa e do SP156 já coincidem (maiúsculas, sem acento), por isso não há mapa de correção.
+# MAGIC **Local (subprefeitura e distrito) por ponto no polígono.** Os limites vêm do GeoSampa (`chegada/geo/subprefeitura.geojson` e `distrito.geojson`, arquivos de referência, não lote). Cada ponto recebe a subprefeitura e o distrito do polígono que o contém, com `shapely`. Um ponto que cai numa fresta de poucos metros entre dois polígonos (efeito da simplificação) recebe o polígono mais próximo, até ~50 m. **Sem coordenada, ou fora de qualquer polígono, o local é `NAO_IDENTIFICADO`** (no lote 1: 71 sinistros sem coordenada e 7 registros com coordenada fora dos limites; a seção 2 mostra quais e a que distância ficam). Vale para as três fontes, inclusive o SP156: a subprefeitura que o SP156 declara (`prefeitura_operacional`) é comparada na seção abaixo e **não é confiável** (valores que não são subprefeitura, e ~2% que contradizem o próprio distrito ou o ponto), então ela só serve de reserva se o ponto não cair em nenhum polígono. Os nomes do GeoSampa e do SP156 já coincidem (maiúsculas, sem acento), por isso não há mapa de correção.
 # MAGIC
 # MAGIC **Status.** SP156: `em_aberto`, `finalizada`, `cancelada` (a fonte não tem "indeferida"). Relatos (status do contrato da API): `novo`, `revisao_humana`, `validado` e `encaminhado` → `em_aberto`; `resolvido` → `finalizada`; `rejeitado` → `indeferida`. `dias_ate_conclusao` = dias entre abertura e finalização, **só das `finalizada` do SP156**; relatos não têm data de conclusão, então ficam nulos.
 # MAGIC
@@ -28,14 +28,16 @@
 # MAGIC
 # MAGIC ## LGPD
 # MAGIC
-# MAGIC | Dado | Tratamento na Ouro |
-# MAGIC |---|---|
-# MAGIC | Número do endereço e CEP (SP156) | **não entram**; ficam só na Prata |
-# MAGIC | Coordenadas | arredondadas a 3 casas (~100 m): `latitude_arred`, `longitude_arred` |
-# MAGIC | Id do registro (`id_solicitacao`, `id` do relato) | vira `id_ocorrencia_hash = sha2(concat(sal, id), 256)`; o id original **não entra**. O sal é lido de `/Volumes/workspace/gs/privado/sal.txt` e **nunca é exibido nem gravado** |
-# MAGIC | `logradouro` | não entra |
+# MAGIC A Prata é a camada interna; a Ouro é a que vai para consulta, painel e API. Por isso a Ouro só leva o que é necessário para agregar por local, tempo e categoria:
 # MAGIC
-# MAGIC **Atenção: os relatos não trazem identificador de cidadão.** O contrato da API nunca devolve o `autor_id` (a API guarda só o hash), e nem o JSON coletado, nem a Bronze, nem a Prata têm esse campo. O único identificador dos relatos é o `id` do próprio relato, e é ele que é transformado em hash. Se a API passar a entregar um campo de autor, ele deve ser tratado do mesmo jeito (`sha2(concat(sal, autor), 256)`) numa coluna nova. A última célula prova que nenhuma coluna da Ouro contém número, CEP ou id original.
+# MAGIC | Dado | Tratamento na Ouro | Por quê |
+# MAGIC |---|---|---|
+# MAGIC | Número do endereço e CEP (SP156) | **não entram**; ficam só na Prata | Com a rua, identificam o imóvel e, portanto, o seu dono ou morador, que é quem fez o pedido |
+# MAGIC | Coordenadas | arredondadas a 3 casas (~100 m): `latitude_arred`, `longitude_arred` | Basta para mapa e agregação; 100 m já não aponta uma casa. A subprefeitura e o distrito são atribuídos antes, com a coordenada completa |
+# MAGIC | `id` do relato (e `id_solicitacao` do SP156) | `id_ocorrencia_hash = sha2(concat(sal, id), 256)`; o id original **não entra** | **Pseudonimização.** O `id` do relato é a chave que liga o registro à foto e à descrição guardadas no banco do app. Com o sal, que é secreto, ninguém com acesso só à Ouro consegue refazer essa ligação nem testar ids conhecidos. O sal é lido de `/Volumes/workspace/gs/privado/sal.txt` e **nunca é exibido nem gravado**. No SP156 o hash também impede refazer o endereço a partir do `id_solicitacao`, que é derivado dele |
+# MAGIC | Texto livre e foto (`descricao`, `foto_url`), `logradouro` | **não entram** | O cidadão pode digitar telefone, CPF ou nome na descrição. Como a análise não usa o texto, ele fica na Prata em vez de ser mascarado na Ouro |
+# MAGIC
+# MAGIC **Não existe identificador do cidadão nos relatos hoje.** O contrato da API nunca devolve o `autor_id` (a API guarda só o hash), e o JSON coletado, a Bronze e a Prata não têm esse campo; o único identificador é o `id` do próprio relato, que é o que recebe o hash. **Se a API passar a enviar um identificador do cidadão, ele recebe o mesmo hash (`sha2(concat(sal, autor), 256)`) numa coluna própria**, nunca em `id_ocorrencia_hash`. A última célula mostra 5 relatos e prova que nenhuma coluna da Ouro contém número, CEP, id original ou texto livre.
 # MAGIC
 # MAGIC **Análises usam só o SP156.** Os relatos são **simulados** (`simulado = true`) e existem só nas áreas-piloto; entram na `fato_ocorrencia` para o painel, mas `04_consultas` e a `vw_prioridades` filtram `origem = 'sp156'`.
 
@@ -135,7 +137,8 @@ assert len(dis_feicoes) == 96, f"esperava 96 distritos, vieram {len(dis_feicoes)
 
 sub_nomes = [normalizar(f["properties"]["nm_subprefeitura"]) for f in sub_feicoes]
 dis_nomes = [normalizar(f["properties"]["nm_distrito_municipal"]) for f in dis_feicoes]
-arvore_sub = shapely.STRtree([shape(f["geometry"]) for f in sub_feicoes])
+sub_geoms = [shape(f["geometry"]) for f in sub_feicoes]
+arvore_sub = shapely.STRtree(sub_geoms)
 arvore_dis = shapely.STRtree([shape(f["geometry"]) for f in dis_feicoes])
 
 # Cada distrito pertence a uma subprefeitura: base da dim_local
@@ -180,8 +183,10 @@ pontos = (
 lats = pontos["lat"].to_numpy(dtype=float)
 lons = pontos["lon"].to_numpy(dtype=float)
 
+subs = achar(arvore_sub, sub_nomes, lons, lats)
+dists = achar(arvore_dis, dis_nomes, lons, lats)
 mapa_geo = spark.createDataFrame(
-    list(zip(lats.tolist(), lons.tolist(), achar(arvore_sub, sub_nomes, lons, lats), achar(arvore_dis, dis_nomes, lons, lats))),
+    list(zip(lats.tolist(), lons.tolist(), subs, dists)),
     "lat double, lon double, subprefeitura_geo string, distrito_geo string",
 )
 mapa_geo.createOrReplaceTempView("_mapa_geo")
@@ -192,6 +197,26 @@ resumo_mapa = spark.sql("""
     FROM _mapa_geo
 """)
 display(resumo_mapa)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Pontos com coordenada que não caem em nenhum polígono
+# MAGIC Além dos sinistros **sem coordenada** (71 no lote 1, que ficam `NAO_IDENTIFICADO` por definição), alguns pontos com coordenada ficam fora de todo polígono. No lote 1 são 6 pontos distintos (7 registros: 6 sinistros do Infosiga e 1 solicitação do SP156). **Não é efeito da simplificação:** conferido no GeoJSON original do GeoSampa (sem simplificar), esses pontos também ficam fora de todos os polígonos, e a distância ao polígono mais próximo muda no máximo ~2 m entre o original e o simplificado. Estão **fora dos limites do município** na geometria oficial: a menos de ~160 m dos limites (provável ponto de divisa ou imprecisão do GPS na via) e dois a 1,3 km e 5,5 km, bem além da divisa (coordenada provavelmente errada no Infosiga, que informa município São Paulo). A tolerância de ~50 m cobre só as frestas da simplificação; **não a aumento**, porque atribuir a uma subprefeitura um ponto que está fora do município seria chutar. Por isso, a geometria original não é usada na atribuição. Os pontos aparecem abaixo, com a coordenada arredondada a 3 casas, e o total por origem na seção 6.
+
+# COMMAND ----------
+
+sem_poligono = [i for i, s in enumerate(subs) if s is None or dists[i] is None]
+distancias = []
+for i in sem_poligono:
+    ponto = shapely.Point(float(lons[i]), float(lats[i]))
+    distancias.append(min(g.distance(ponto) for g in sub_geoms) * 111_000)  # graus -> metros (aprox.)
+display(
+    spark.createDataFrame(
+        [(round(float(lats[i]), 3), round(float(lons[i]), 3), round(d)) for i, d in zip(sem_poligono, distancias)],
+        "lat_arred double, lon_arred double, distancia_ao_poligono_mais_proximo_m long",
+    ).orderBy("distancia_ao_poligono_mais_proximo_m")
+)
 
 
 def com_local(df, col_lat, col_lon):
@@ -580,7 +605,7 @@ display(spark.table(t("vw_prioridades")).orderBy(F.col("indice_prioridade").desc
 
 # MAGIC %md
 # MAGIC ## 8. LGPD: o que a Ouro não pode conter
-# MAGIC Cinco linhas de relatos com a coluna de hash e os testes. Os testes comparam **nomes de colunas** e **valores** da Ouro com o que existe na Prata (número, CEP, ids originais). O sal não é exibido.
+# MAGIC Cinco linhas de relatos com a coluna de hash e os testes. Os testes comparam **nomes de colunas** e **valores** da Ouro com o que existe na Prata (número, CEP, ids originais, descrição dos relatos) e garantem que **não há coluna de texto livre**: as únicas colunas de texto são categóricas ou o hash, e uma coluna de texto nova faz o teste falhar. O sal não é exibido.
 
 # COMMAND ----------
 
@@ -649,6 +674,36 @@ mais_de_3_casas = fato.filter(
 ).count()
 testar("latitude_arred e longitude_arred têm no máximo 3 casas decimais", mais_de_3_casas == 0, f"{mais_de_3_casas} fora")
 
+# 5) Nenhuma coluna de texto livre (descrição do relato, foto, logradouro): só as colunas de texto abaixo, todas
+# categóricas ou hash. Qualquer coluna de texto nova na Ouro derruba o teste e obriga a revisar.
+TEXTO_PERMITIDO = {
+    "dim_tempo": {"dia_semana"},
+    "dim_local": {"subprefeitura", "distrito"},
+    "dim_categoria": {"categoria", "grupo"},
+    "fato_ocorrencia": {"id_ocorrencia_hash", "origem", "status"},
+    "fato_sinistro_pedestre": {"id_sinistro"},
+    "vw_prioridades": {"subprefeitura", "prioridade"},
+}
+TEXTO_LIVRE = re.compile(r"descri|texto|observ|coment|mensagem|relato_txt|foto|url|logradouro|endereco")
+colunas_de_texto = {tabela: {c for c, tipo in spark.table(t(tabela)).dtypes if tipo == "string"} for tabela in TABELAS_OURO}
+inesperadas = {tabela: sorted(cols - TEXTO_PERMITIDO[tabela]) for tabela, cols in colunas_de_texto.items() if cols - TEXTO_PERMITIDO[tabela]}
+nomes_de_texto_livre = [f"{tabela}.{c}" for tabela in TABELAS_OURO for c in spark.table(t(tabela)).columns if TEXTO_LIVRE.search(c.lower())]
+testar("só as colunas de texto previstas (nenhuma de texto livre) na Ouro", not inesperadas, inesperadas or "ok")
+testar("nenhum nome de coluna da Ouro indica texto livre, foto ou logradouro", not nomes_de_texto_livre, nomes_de_texto_livre or "ok")
+
+# valores: nenhum texto livre dos relatos (descricao) aparece em coluna de texto, e nenhum valor passa de 64 caracteres (o hash)
+descricoes = spark.table(t("prata_relatos")).filter("descricao IS NOT NULL").select(F.col("descricao").alias("v")).distinct()
+achados_texto, mais_longos = [], 0
+for tabela, cols in colunas_de_texto.items():
+    df = spark.table(t(tabela))
+    for coluna in cols:
+        valores = df.select(F.col(coluna).alias("c"))
+        if valores.join(descricoes, valores["c"] == descricoes["v"], "left_semi").limit(1).count():
+            achados_texto.append(f"{tabela}.{coluna}")
+        mais_longos += valores.filter(F.length("c") > 64).count()
+testar("nenhuma descrição de relato aparece em coluna de texto da Ouro", not achados_texto, achados_texto or "ok")
+testar("nenhum valor de texto da Ouro passa de 64 caracteres (tamanho do hash)", mais_longos == 0, f"{mais_longos} valores")
+
 display(spark.createDataFrame(testes, "teste string, passou boolean, detalhe string"))
 assert all(ok for _, ok, _ in testes), "TESTE DE LGPD FALHOU (veja a tabela acima)"
-print("LGPD ok: nenhuma coluna da Ouro contém número, CEP ou id original.")
+print("LGPD ok: nenhuma coluna da Ouro contém número, CEP, id original ou texto livre.")

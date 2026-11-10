@@ -199,22 +199,37 @@ O script confere as contagens (32 e 96) e se as coordenadas estão em lat/lon de
 | `fato_ocorrencia` | solicitação do SP156 e relato | `id_ocorrencia_hash`, `origem` (`sp156`/`relato`), `data`, `local_id`, `categoria_id`, `status`, `dias_ate_conclusao`, `simulado`, `latitude_arred`, `longitude_arred` |
 | `fato_sinistro_pedestre` | sinistro do Infosiga com pedestre | `id_sinistro`, `data`, `local_id`, `qtd_pedestres`, `qtd_pedestres_feridos`, `qtd_pedestres_mortos` |
 
-- **Local por ponto no polígono**, com `shapely` (`%pip` no notebook), para as **três** fontes. Ponto numa fresta de poucos metros entre polígonos (efeito da simplificação) recebe o polígono mais próximo, até ~50 m. Sem coordenada, ou fora de qualquer polígono, o local é `NAO_IDENTIFICADO`. **O SP156 também usa o ponto**, e não a subprefeitura que ele declara: na comparação (lote 1) ela não é confiável. Além dos 31 valores acima, em 2,0% das linhas (209 de 10.635) diverge do ponto no polígono e em 196 contradiz o próprio distrito declarado. O declarado só serve de reserva quando o ponto não cai em polígono (hoje nunca).
+- **Local por ponto no polígono**, com `shapely` (`%pip` no notebook), para as **três** fontes. Ponto numa fresta de poucos metros entre polígonos (efeito da simplificação) recebe o polígono mais próximo, até ~50 m. Sem coordenada, ou fora de qualquer polígono, o local é `NAO_IDENTIFICADO` (ver "Registros sem local" abaixo). **O SP156 também usa o ponto**, e não a subprefeitura que ele declara: na comparação (lote 1) ela não é confiável. Além dos 31 valores acima, em 2,0% das linhas (209 de 10.635) diverge do ponto no polígono e em 196 contradiz o próprio distrito declarado. O declarado só serve de reserva quando o ponto não cai em polígono (hoje nunca).
 - **Categoria:** `calcada` e `guia_sarjeta` (grupos de mesmo nome) no SP156; `buraco`, `piso_danificado`, `obstaculo` e `veiculo_na_calcada` nos relatos, todos no grupo `calcada`.
 - **Status:** SP156 `em_aberto`, `finalizada`, `cancelada` (a fonte não tem "indeferida"). Relatos: `novo`, `revisao_humana`, `validado`, `encaminhado` → `em_aberto`; `resolvido` → `finalizada`; `rejeitado` → `indeferida`. `dias_ate_conclusao` só existe nas `finalizada` do SP156 (relatos não têm data de conclusão).
 - **Chuva forte:** `precipitacao_dia_mm` é a soma das 24 horas do dia; `chuva_forte` = **≥ 10 mm/dia**; dia sem clima fica nulo. Os 10 mm são analíticos: com 50 mm/dia (alerta de chuva intensa do INMET) nenhum dia de jun-ago/2026 qualifica; com 10 mm há 4 dias no lote 1 (de 92) e 23 de 161 no clima até 08/11. A amostra do lote 1 é pequena, então a Q5 é indício.
 - **As análises usam só `origem = 'sp156'`.** Os relatos são simulados e existem só nas áreas-piloto; ficam na `fato_ocorrencia` para o painel, mas nenhuma consulta nem o índice os usa, exceto `relatos_abertos`/`relatos_por_categoria` da view (que são do contrato).
 
+### Registros sem local
+
+No lote 1, 77 dos 926 sinistros ficam `NAO_IDENTIFICADO`, e uma solicitação do SP156 (de 10.666):
+
+- **71 sinistros não têm coordenada** (o Infosiga não geolocaliza ~8%); a Prata os mantém com `tem_coordenada = false`.
+- **6 sinistros e 1 solicitação do SP156 têm coordenada, mas ela não cai em nenhum polígono.** Eram 6 pontos distintos (dois sinistros dividem o mesmo ponto). **Não é efeito da simplificação:** conferi no GeoJSON original do GeoSampa, sem simplificar, e os mesmos pontos também ficam fora de todos os polígonos; a distância ao polígono mais próximo muda no máximo ~2 m entre o original e o simplificado. Os pontos estão **fora dos limites do município** na geometria oficial: 4 a menos de ~160 m (52, 76, 108 e 154 m, provável ponto de divisa ou imprecisão do GPS na via) e 2 bem além, a 1,3 km e a 5,5 km (coordenada provavelmente errada; o Infosiga informa município São Paulo).
+
+A tolerância de ~50 m cobre só as frestas entre polígonos; não a ampliei, porque atribuir a uma subprefeitura um ponto que está fora do município seria chutar. Por isso a atribuição continua usando a geometria simplificada. Esses registros não se perdem: ficam na Ouro com `NAO_IDENTIFICADO` e só saem dos rankings por subprefeitura. O `03_ouro` lista os pontos (coordenada a 3 casas e distância ao polígono mais próximo).
+
 ### LGPD na Ouro
 
-| Dado | Tratamento |
-|---|---|
-| Número do endereço e CEP (SP156) | **não entram** na Ouro |
-| `logradouro` | não entra |
-| Coordenadas | arredondadas a 3 casas (~100 m): `latitude_arred`, `longitude_arred`; a atribuição de local usa a coordenada completa e o arredondamento vem depois |
-| Id do registro | `id_ocorrencia_hash = sha2(concat(sal, id), 256)`; o id original não entra. Sal lido de `/Volumes/workspace/gs/privado/sal.txt`, nunca exibido nem gravado |
+A Prata é a camada interna; a Ouro é a que vai para consulta, painel e API. Por isso a Ouro só leva o necessário para agregar por local, tempo e categoria:
 
-**Os relatos não trazem identificador de cidadão.** O contrato da API nunca devolve o `autor_id` (a API guarda só o hash), e o JSON coletado, a Bronze e a Prata não têm esse campo; o único identificador é o `id` do próprio relato, que é o que vira hash (o mesmo vale para o `id_solicitacao` do SP156). Se a API passar a entregar um campo de autor, aplique o mesmo `sha2(concat(sal, autor), 256)` numa coluna nova. A última célula de `03_ouro` mostra 5 linhas de relatos com o hash e roda os testes: nenhum nome de coluna da Ouro é número, CEP, logradouro, id ou coordenada exata; nenhum id original nem CEP aparece em coluna de texto; o hash dos relatos confere com a fórmula; as coordenadas têm até 3 casas. `id_sinistro` (id público do Infosiga) permanece.
+| Dado | Tratamento na Ouro | Por quê |
+|---|---|---|
+| Número do endereço e CEP (SP156) | **não entram**; ficam só na Prata | Com a rua, identificam o imóvel e, portanto, o seu dono ou morador, que é quem fez o pedido |
+| Coordenadas | arredondadas a 3 casas (~100 m): `latitude_arred`, `longitude_arred` | Basta para mapa e agregação; 100 m já não aponta uma casa. A subprefeitura e o distrito são atribuídos antes, com a coordenada completa |
+| `id` do relato (e `id_solicitacao` do SP156) | `id_ocorrencia_hash = sha2(concat(sal, id), 256)`; o id original não entra | **Pseudonimização.** O `id` do relato é a chave que liga o registro à foto e à descrição guardadas no banco do app. Com o sal, que é secreto, quem tem acesso só à Ouro não consegue refazer essa ligação nem testar ids conhecidos. Sal em `/Volumes/workspace/gs/privado/sal.txt`, nunca exibido nem gravado. No SP156 o hash também impede refazer o endereço a partir do `id_solicitacao`, que é derivado dele |
+| Texto livre e foto (`descricao`, `foto_url`), `logradouro` | **não entram** | O cidadão pode digitar telefone, CPF ou nome na descrição. Como a análise não usa o texto, ele fica na Prata em vez de ser mascarado na Ouro |
+
+**Texto livre.** A `prata_relatos` tem `descricao` (texto digitado pelo cidadão; no lote 1 são só 4 frases simuladas, sem telefone, CPF ou e-mail) e `foto_url`. Nenhum dos dois, nem o `logradouro` do SP156, entra na Ouro: os `select` são explícitos e o teste de LGPD falha se aparecer uma coluna de texto que não esteja na lista permitida (só categorias e o hash).
+
+**Não existe identificador do cidadão nos relatos hoje.** O contrato da API nunca devolve o `autor_id` (a API guarda só o hash), e o JSON coletado, a Bronze e a Prata não têm esse campo; o único identificador é o `id` do próprio relato, que é o que recebe o hash. **Se a API passar a enviar um identificador do cidadão, ele recebe o mesmo hash (`sha2(concat(sal, autor), 256)`) numa coluna própria**, nunca em `id_ocorrencia_hash`.
+
+A última célula de `03_ouro` mostra 5 relatos com o hash e roda os testes: nenhum nome de coluna da Ouro é número, CEP, logradouro, id ou coordenada exata; nenhum id original, CEP ou descrição de relato aparece em coluna de texto; as únicas colunas de texto são as categóricas e o hash (nenhuma de texto livre, nenhum valor com mais de 64 caracteres); o hash dos relatos confere com a fórmula; as coordenadas têm até 3 casas. `id_sinistro` (id público do Infosiga) permanece.
 
 ### View `vw_prioridades` e o contrato de `GET /painel`
 
@@ -261,7 +276,7 @@ Conferido por `python scripts/conferir_ouro.py` (Prata refeita a partir de `cheg
 | Tabela | Linhas |
 |---|---|
 | `fato_ocorrencia` | 12.306 (10.666 `sp156` + 1.640 `relato`) |
-| `fato_sinistro_pedestre` | 926 (77 sem local: 71 sem coordenada + 6 fora dos polígonos) |
+| `fato_sinistro_pedestre` | 926 (77 sem local: 71 sem coordenada + 6 fora dos polígonos, ver abaixo) |
 | `dim_tempo` | 92 (01/06 a 31/08) |
 | `dim_categoria` | 6 |
 
