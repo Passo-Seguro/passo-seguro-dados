@@ -9,7 +9,9 @@
 # Sem chave nem SAS: o envio usa o seu `az login` (papel Storage Blob Data Contributor no container painel).
 # Opcional: $env:DATABRICKS_PROFILE (padrão gs).
 # Requer: databricks CLI, az, python com `pip install pyyaml jsonschema`.
-$ErrorActionPreference = 'Stop'
+# 'Continue' de propósito: no PowerShell 5.1, qualquer linha que uma CLI escreva em stderr (ex.: o aviso de skills
+# do databricks) viraria erro fatal com 'Stop'. O resultado de cada CLI é conferido por $LASTEXITCODE (Confirmar).
+$ErrorActionPreference = 'Continue'
 $env:PYTHONUTF8 = '1'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 
@@ -29,13 +31,13 @@ $UrlApi = $env:PAINEL_APP_URL.TrimEnd('/') + '/api/painel'
 function Confirmar([string]$Passo) { if ($LASTEXITCODE -ne 0) { throw "$Passo falhou (código $LASTEXITCODE)" } }
 
 $Tmp = Join-Path ([IO.Path]::GetTempPath()) ("painel-" + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $Tmp | Out-Null
+New-Item -ItemType Directory -Path $Tmp -ErrorAction Stop | Out-Null
 try {
     $Utf8 = New-Object System.Text.UTF8Encoding($false)
 
     Write-Host "1/5 Atualizando openapi.yaml a partir de $RepoPrincipal (main)"
     # Bytes direto para o arquivo: sem passar pela codificação do console, que estragaria os acentos.
-    $r = Invoke-WebRequest -Uri "https://api.github.com/repos/$RepoPrincipal/contents/openapi.yaml?ref=main" -Headers @{ Accept = 'application/vnd.github.raw' } -UseBasicParsing
+    $r = Invoke-WebRequest -Uri "https://api.github.com/repos/$RepoPrincipal/contents/openapi.yaml?ref=main" -Headers @{ Accept = 'application/vnd.github.raw' } -UseBasicParsing -ErrorAction Stop
     $bytes = $r.RawContentStream.ToArray()
     if ($Utf8.GetString($bytes, 0, [Math]::Min(8, $bytes.Length)) -ne 'openapi:') { throw 'o que veio do GitHub não parece um openapi.yaml' }
     [IO.File]::WriteAllBytes((Join-Path $Raiz 'openapi.yaml'), $bytes)
@@ -56,7 +58,7 @@ try {
     Write-Host "5/5 Conferindo GET $UrlApi"
     $Resposta = Join-Path $Tmp 'resposta.json'
     try {
-        $r = Invoke-WebRequest -Uri $UrlApi -UseBasicParsing
+        $r = Invoke-WebRequest -Uri $UrlApi -UseBasicParsing -ErrorAction Stop
         [IO.File]::WriteAllBytes($Resposta, $r.RawContentStream.ToArray())
     } catch {
         $codigo = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 'sem resposta' }
