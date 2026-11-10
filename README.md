@@ -18,10 +18,10 @@ Ficha Técnica: [README do repositório principal](https://github.com/Passo-Segu
 A DAG `gs_coleta` (`@daily`, `start_date` 2026-06-01, `catchup=True`) grava **um arquivo por fonte e por dia** em `chegada/<fonte>/`. O upload ao Databricks é manual, pela interface.
 
 ```
-inicio >> [coletar_sp156, coletar_infosiga, coletar_clima, coletar_relatos] >> conferir_chegada
+inicio >> [coletar_sp156, coletar_infosiga, coletar_open_meteo, coletar_relatos] >> conferir_chegada
 ```
 
-São 6 tarefas: `inicio` (`EmptyOperator`), as 4 coletas em paralelo e `conferir_chegada`, que confere se os arquivos chegaram. Na interface a coleta da Open-Meteo aparece como `coletar_clima` (`task_display_name`), mas o `task_id` continua `coletar_open_meteo`, o mesmo nome da fonte e da pasta; assim os logs e o histórico dos runs já executados ficam como estavam. Para usar na CLI, use `coletar_open_meteo`.
+São 6 tarefas: `inicio` (`EmptyOperator`), as 4 coletas em paralelo e `conferir_chegada`, que confere se os arquivos chegaram. Cada coleta tem o nome da fonte e da pasta em `chegada/`.
 
 ![Graph da DAG gs_coleta: inicio, as 4 coletas em paralelo e conferir_chegada](relatorio/prints/06a_airflow_graph.png)
 
@@ -46,15 +46,13 @@ No Grid, `coletar_sp156` e `coletar_infosiga` ficam em rosa (`skipped`) de 01/10
 
 ### Conferência de chegada (`conferir_chegada`)
 
-Roda depois das 4 coletas, com `trigger_rule=none_failed_min_one_success` (nenhuma coleta falhou e ao menos uma gravou; coleta `skipped` não a impede). Para o dia do run, ela confere:
+Roda depois das 4 coletas, com `trigger_rule=none_failed`: roda quando nenhuma coleta falhou, **mesmo que todas tenham ficado `skipped`**, para falhar nesse caso em vez de ficar `skipped` sem avisar. (Se uma coleta falhar, o alerta já sai dela e a conferência fica `upstream_failed`.) Para o dia do run, ela confere:
 
 - coleta em `success`: existe `chegada/<fonte>/<fonte>_AAAA-MM-DD.<ext>` e o arquivo não está vazio (0 bytes). CSV só com cabeçalho (dia do Infosiga sem sinistro com pedestre) é válido e sai como aviso no log;
 - coleta em `skipped`: não há arquivo, e o log traz o motivo (lido do log da coleta, porque o Airflow não o guarda no banco);
 - **falha** se uma coleta `success` não deixou arquivo, se o estado for inesperado ou se nenhuma fonte gravou. A falha não tem nova tentativa e dispara o mesmo alerta do Discord das outras tarefas (`on_failure_callback` da DAG).
 
 O log de cada run lista uma linha por fonte (`[CHEGOU]` ou `[SKIPPED] ... Motivo: ...`) e um resumo. A lógica está em `dags/gs_coleta_lib/conferir.py`, separada da DAG para ser testável sem o Airflow.
-
-Limite conhecido: com essa trigger rule, se **todas** as coletas ficarem `skipped`, a própria `conferir_chegada` fica `skipped` em vez de falhar (hoje não acontece: Open-Meteo e relatos gravam todo dia). Para falhar nesse caso também, troque para `TriggerRule.NONE_FAILED`.
 
 **Runs antigos.** `inicio` e `conferir_chegada` foram acrescentadas aos 162 runs já executados (01/06 a 09/11) **sem regravar nenhum arquivo de `chegada/`**. `airflow tasks clear` só limpa tarefas que já existem no banco, e essas duas não existiam nos runs antigos; por isso cada run foi recolocado na fila (`queued`). O scheduler então criou só as tarefas que faltavam e executou só elas, e as `coletar_*`, já em `success`/`skipped`, não foram reexecutadas. Conferido depois: hash e mtime dos 568 arquivos de `chegada/` iguais aos de antes, e as 648 tarefas `coletar_*` com estado, início, fim e tentativas intactos. Efeito colateral: a data de início e a duração de cada run, na interface, passam a ser as da conferência (10/11/2026, cerca de 1 s), não as da coleta original.
 

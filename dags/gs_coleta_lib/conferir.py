@@ -24,8 +24,7 @@ from . import comum
 
 log = logging.getLogger(__name__)
 
-# task_id de cada coleta -> fonte (nome da pasta em chegada/). O task_id da Open-Meteo segue
-# 'coletar_open_meteo' (aparece como 'coletar_clima' na interface; ver task_display_name na DAG).
+# fonte (nome da pasta em chegada/) -> task_id da coleta
 TAREFA_DA_FONTE = {
     "sp156": "coletar_sp156",
     "infosiga": "coletar_infosiga",

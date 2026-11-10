@@ -1,23 +1,20 @@
 """DAG gs_coleta: coleta diária das quatro fontes para a pasta chegada/ (zona de aterrissagem).
 
-Estrutura:  inicio >> [coletar_sp156, coletar_infosiga, coletar_clima, coletar_relatos] >> conferir_chegada
+Estrutura:  inicio >> [coletar_sp156, coletar_infosiga, coletar_open_meteo, coletar_relatos] >> conferir_chegada
 
 Os arquivos de chegada/ são enviados ao Databricks manualmente, pela interface; esta DAG
 não faz upload. Cada coleta grava chegada/<fonte>/<fonte>_AAAA-MM-DD.<ext> e é idempotente.
 Depois das quatro coletas, conferir_chegada confere se cada uma que terminou em 'success' deixou
 o arquivo do dia (e se ele não está vazio), loga o que chegou e o que foi 'skipped' com o motivo, e
 falha (com o mesmo alerta do Discord) se uma coleta 'success' não deixou arquivo ou se nenhuma
-fonte gravou.
+fonte gravou. Ela roda mesmo que todas as coletas tenham ficado 'skipped' (trigger_rule none_failed),
+justamente para falhar nesse caso em vez de passar em silêncio.
 
 Por que SP156 e Infosiga aparecem como 'skipped'. As duas fontes só publicam o trimestre depois que
 ele fecha, e com semanas de atraso. Dia cujo trimestre ainda não saiu (hoje, de 01/10/2026 em
 diante) não tem arquivo, e a coleta fica 'skipped' em vez de falhar: é esperado, não é erro. A
 Open-Meteo e os relatos não têm essa defasagem e gravam todos os dias. Quando o trimestre sair, limpe
 as coletas 'skipped' daquelas datas para recoletar.
-
-O task_id da Open-Meteo é 'coletar_open_meteo' (o mesmo nome da fonte e da pasta chegada/open_meteo/);
-a interface do Airflow o mostra como 'coletar_clima' (task_display_name). Manter o task_id preserva
-o histórico, os logs e as tentativas dos runs já executados.
 
 Variables do Airflow:
   ALERTA_WEBHOOK_URL     webhook do Discord que recebe o alerta de falha
@@ -76,7 +73,7 @@ def gs_coleta():
     def coletar_infosiga():
         return infosiga.coletar(_dia())
 
-    @task(task_display_name="coletar_clima")
+    @task
     def coletar_open_meteo():
         return open_meteo.coletar(_dia())
 
@@ -84,8 +81,10 @@ def gs_coleta():
     def coletar_relatos():
         return relatos.coletar(_dia())
 
-    # Roda quando nenhuma coleta falhou e pelo menos uma gravou; coleta 'skipped' não impede a conferência.
-    @task(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
+    # NONE_FAILED: roda quando nenhuma coleta falhou, mesmo que todas tenham ficado 'skipped'; assim ela
+    # falha ("nenhuma fonte gravou") em vez de ficar 'skipped' sem avisar. Se uma coleta falhar, o alerta
+    # já sai dela e a conferência fica 'upstream_failed'.
+    @task(trigger_rule=TriggerRule.NONE_FAILED)
     def conferir_chegada():
         contexto = get_current_context()
         run = contexto["dag_run"]
