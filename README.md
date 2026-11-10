@@ -98,7 +98,7 @@ Fica em `/Volumes/workspace/gs/privado/sal.txt` (64 caracteres hex, gerado com `
 Os arquivos de `chegada/` **não** vão para o Git e sobem manualmente, pela interface (Catalog → `workspace.gs.chegada` → pasta da fonte → *Upload to this volume*), mantendo a pasta de cada fonte e o nome do arquivo.
 
 1. Suba o **lote 1** (os arquivos mais antigos, nas pastas de cada fonte) e rode a Bronze (abaixo). Tire print da tabela de contagem do fim do notebook.
-2. Suba o **lote 2** (o restante, em ordem de data) e rode a Bronze de novo. Tire print: só as linhas do lote 2 entram.
+2. Suba o **lote 2** (o restante, em ordem de data; **data do lote 2: 10/11/2026**) e rode a Bronze de novo. Tire print: só as linhas do lote 2 entram.
 3. Rode a Bronze **mais uma vez, sem subir nada**. Tire print: os números não mudam (o checkpoint do Auto Loader já tem esses arquivos).
 
 ### Rodar a Bronze
@@ -187,7 +187,7 @@ Status do SP156 aceito: 5.882 `em_aberto`, 4.773 `finalizada`, 11 `cancelada`. `
 
 ## Ouro
 
-Camada final: modelo dimensional sem dado pessoal, uma view de prioridades por subprefeitura e o `painel.json` que a API serve em `GET /painel`. Ordem de execução: Bronze → Prata → **Ouro** (`03_ouro`) → consultas (`04_consultas`) → export (`05_export`). A Ouro é **derivada**: cada execução refaz todas as tabelas com `CREATE OR REPLACE TABLE` a partir da Prata, então depois do lote 2 basta rodar a Bronze, a Prata e a Ouro de novo.
+Camada final: modelo dimensional sem dado pessoal, uma view de prioridades por subprefeitura e o `painel.json` que a API serve em `GET /painel`. Ordem de execução: Bronze → Prata → **Ouro** (`03_ouro`) → consultas (`04_consultas`) → export (`05_export`). A Ouro é **derivada**: cada execução refaz todas as tabelas com `CREATE OR REPLACE TABLE` a partir da Prata, então depois do lote 2 (10/11/2026) basta rodar a Bronze, a Prata e a Ouro de novo; para o painel chegar à API, rode o `05_export` e **depois** o `publicar_painel` (seção "Publicar o painel").
 
 | Arquivo | O que faz |
 |---|---|
@@ -195,8 +195,9 @@ Camada final: modelo dimensional sem dado pessoal, uma view de prioridades por s
 | [`databricks/03_ouro.py`](databricks/03_ouro.py) | dimensões, fatos, view `vw_prioridades` e testes de LGPD |
 | [`databricks/04_consultas.sql`](databricks/04_consultas.sql) | as 5 perguntas (Q4 em duas versões), só sobre a Ouro |
 | [`databricks/05_export.py`](databricks/05_export.py) | grava `vw_prioridades` em `workspace.gs.export/painel.json` |
+| [`scripts/publicar_painel.ps1`](scripts/publicar_painel.ps1) / [`.sh`](scripts/publicar_painel.sh) | baixa o `painel.json`, valida contra o `openapi.yaml`, envia ao Azure Blob Storage e confere `GET /api/painel` |
 | [`scripts/conferir_ouro.py`](scripts/conferir_ouro.py) | refaz tudo localmente a partir de `chegada/` para conferir os números |
-| [`docs/proposta-contrato-painel.md`](docs/proposta-contrato-painel.md) | campos a acrescentar em `GET /painel` no `openapi.yaml` |
+| [`docs/proposta-contrato-painel.md`](docs/proposta-contrato-painel.md) | proposta dos 5 campos extras de `GET /painel` (já aplicada ao contrato no PR #25 do `passo-seguro`) |
 
 ### Limites geográficos (GeoSampa)
 
@@ -257,7 +258,7 @@ A última célula de `03_ouro` mostra 5 relatos com o hash e roda os testes: nen
 
 ### View `vw_prioridades` e o contrato de `GET /painel`
 
-Uma linha por subprefeitura (as 32). Tem **duas famílias de colunas**: as do contrato (`PrioridadeSubprefeitura` no `openapi.yaml`, que o `05_export` grava) e as de análise (ainda fora do contrato).
+Uma linha por subprefeitura (as 32). Tem **duas famílias de colunas**: as do contrato (`PrioridadeSubprefeitura` no `openapi.yaml`, que o `05_export` grava) e as de análise (campos extras, opcionais no contrato desde o PR #25 do `passo-seguro`; o `05_export` grava os dois grupos).
 
 | Coluna | Tipo | Contrato | Origem |
 |---|---|---|---|
@@ -267,19 +268,40 @@ Uma linha por subprefeitura (as 32). Tem **duas famílias de colunas**: as do co
 | `relatos_por_categoria` | struct das 4 classes | sim | os mesmos relatos, por classe |
 | `tempo_medio_ate_reparo_dias` | double ou nulo | sim | média de `dias_ate_conclusao` do SP156 `finalizada` |
 | `atualizado_em` | timestamp | sim | `current_timestamp()`; no JSON vira ISO 8601 com fuso |
-| `reclamacoes_calcada_sp156`, `reclamacoes_guia_sarjeta_sp156` | int | proposta | solicitações SP156 |
-| `atropelamentos_pedestres`, `pedestres_mortos` | int | proposta | Infosiga (sinistros com pedestre; mortos) |
-| `indice_prioridade` | double 0 a 1 | proposta | abaixo |
+| `reclamacoes_calcada_sp156`, `reclamacoes_guia_sarjeta_sp156` | int | sim (opcional) | solicitações SP156 |
+| `atropelamentos_pedestres`, `pedestres_mortos` | int | sim (opcional) | Infosiga (sinistros com pedestre; mortos) |
+| `indice_prioridade` | double 0 a 1 | sim (opcional) | abaixo |
 | `pct_em_aberto` | double | só na view | % das solicitações SP156 `em_aberto` |
 
 - **`indice_prioridade`** = `(mm(atropelamentos_pedestres) + mm(reclamacoes_calcada_sp156)) / 2`, com `mm(x) = (x − mínimo) / (máximo − mínimo)` entre as 32 subprefeituras. Guia e sarjeta não entram no índice.
 - **`prioridade`** é a posição relativa do índice (`PERCENT_RANK`): terço de cima `alta` (≥ 2/3), do meio `media` (≥ 1/3), de baixo `baixa`. É relativa: sempre há subprefeituras nas três faixas.
-- **O contrato atual não tem os campos de análise** (`GET /painel` só fala de relatos). Eles ficam na view e **fora** do `painel.json`, porque a API responde `503 painel_invalido` se o arquivo sair do schema. Em `05_export.py` a lista está na constante `COLUNAS_EXTRAS`: quando o contrato for ampliado (proposta em [`docs/proposta-contrato-painel.md`](docs/proposta-contrato-painel.md)), mude **uma linha**, `INCLUIR_EXTRAS = True`. Os objetos do `painel.json` foram conferidos contra o schema `PrioridadeSubprefeitura` real do `openapi.yaml` (com e sem os extras).
+- **Os campos de análise já estão no contrato.** O PR #25 do `passo-seguro` os acrescentou a `PrioridadeSubprefeitura` como **opcionais** (proposta original em [`docs/proposta-contrato-painel.md`](docs/proposta-contrato-painel.md)), então o `painel.json` os leva: em `05_export.py`, `COLUNAS_EXTRAS` com `INCLUIR_EXTRAS = True`. A API responde `503 painel_invalido` se o arquivo sair do schema, por isso o notebook valida antes de gravar e o `publicar_painel` valida de novo contra o `openapi.yaml` atual.
 - `relatos_abertos` e `relatos_por_categoria` são zero na maior parte da cidade enquanto os relatos forem simulados.
 
 ### Export
 
 `05_export.py` lê a view, ordena por `indice_prioridade` decrescente (como o contrato pede), valida cada objeto contra o contrato e grava **um único** `/Volumes/workspace/gs/export/painel.json` (array de objetos, UTF-8, sem `_SUCCESS` nem `part-*`): o Python escreve direto no Volume. Se algum objeto sair do contrato, o notebook para antes de gravar.
+
+### Publicar o painel
+
+O `05_export` só grava o `painel.json` no Volume do Databricks. Quem leva o arquivo até a API é o `publicar_painel`. **Ordem: rodar o `05_export` (Run all) e, só depois, o `publicar_painel`.** Se rodar o script antes, ele publica o `painel.json` que já estava no Volume (a validação avisa quando faltam os 5 campos extras).
+
+```powershell
+pip install pyyaml jsonschema   # uma vez; se o pyyaml falhar ao compilar (Python novo, sem wheel), rode com PYYAML_FORCE_LIBYAML=0
+$env:PAINEL_STORAGE_ACCOUNT = '<saída storage_account_name do Terraform>'
+$env:PAINEL_APP_URL = '<saída app_url do Terraform>'
+.\scripts\publicar_painel.ps1   # ou, no Git Bash / Linux: scripts/publicar_painel.sh
+```
+
+O script faz, parando no primeiro erro:
+
+1. atualiza `./openapi.yaml` a partir do `main` do repositório principal ([`passo-seguro`](https://github.com/Passo-Seguro/passo-seguro)); a cópia local é só para validar e não vai para o Git;
+2. baixa `/Volumes/workspace/gs/export/painel.json` com `databricks fs cp` (`--profile gs`; troque com `DATABRICKS_PROFILE`);
+3. valida o arquivo contra `PrioridadeSubprefeitura` do `openapi.yaml` ([`scripts/validar_painel.py`](scripts/validar_painel.py)); se algo estiver fora, **nada é enviado**;
+4. envia com `az storage blob upload --auth-mode login --overwrite` para o container `painel`, blob `painel.json`, na conta de `PAINEL_STORAGE_ACCOUNT`. **Sem chave nem SAS**: vale o seu `az login`, que precisa estar em `painel_publicadores_object_ids` no Terraform do `passo-seguro` (papel *Storage Blob Data Contributor* só nesse container);
+5. chama `GET $PAINEL_APP_URL/api/painel` e mostra quantos itens vieram, se os 5 campos extras estão presentes e se a resposta já é a do arquivo recém-enviado.
+
+**Cache de 10 minutos.** A API não lê o blob a cada chamada: guarda o painel validado em memória por **10 minutos** (uma falha de leitura fica guardada por 30 segundos). Por isso o passo 5 pode ainda mostrar o painel antigo logo depois do envio; o script avisa quando a resposta não é a do arquivo novo. Não é falha: espere até 10 minutos e chame `GET /api/painel` de novo (não precisa reenviar nem reiniciar a API). Logo após um `terraform apply`, o envio ou a leitura podem dar 403 por alguns minutos, enquanto o papel se propaga.
 
 ### Importar os notebooks
 
@@ -291,7 +313,7 @@ for n in 03_ouro:PYTHON:py 04_consultas:SQL:sql 05_export:PYTHON:py; do
 done
 ```
 
-Rode no compute serverless, nesta ordem: `03_ouro` → `04_consultas` → `05_export` (Run all). O `03_ouro` instala o `shapely` com `%pip` e reinicia o Python na segunda célula.
+Rode no compute serverless, nesta ordem: `03_ouro` → `04_consultas` → `05_export` (Run all). O `03_ouro` instala o `shapely` com `%pip` e reinicia o Python na segunda célula. Depois do `05_export`, publique com o `publicar_painel` (seção acima).
 
 ### Resultado esperado com o lote 1 (até 31/08/2026)
 

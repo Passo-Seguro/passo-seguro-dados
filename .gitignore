@@ -228,3 +228,6 @@ secrets.h
 # Pipeline de dados: lotes coletados e entradas manuais (grandes; o Databricks recebe pela interface)
 chegada/
 entrada_manual/
+
+# Cópia local do contrato, baixada de Passo-Seguro/passo-seguro pelo scripts/publicar_painel.*
+/openapi.yaml

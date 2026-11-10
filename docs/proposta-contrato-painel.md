@@ -1,5 +1,7 @@
 # Proposta: ampliar `PrioridadeSubprefeitura` (`GET /painel`)
 
+> **Status: aplicada.** Estes campos entraram no contrato no PR #25 do `passo-seguro` (opcionais em `PrioridadeSubprefeitura`), e o `05_export` já os exporta (`INCLUIR_EXTRAS = True`). O texto abaixo é o registro da proposta.
+
 Para aplicar no `openapi.yaml` do repositório principal ([passo-seguro](https://github.com/Passo-Seguro/passo-seguro)), por pull request, como o contrato exige.
 
 ## Por quê
